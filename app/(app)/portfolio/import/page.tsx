@@ -9,7 +9,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Upload, CheckCircle, AlertCircle, ArrowLeft } from 'lucide-react'
 import type { BrokerPortfolio, BrokerHolding } from '@/lib/broker/types'
 
-type ImportState = 'idle' | 'parsing' | 'review' | 'confirming' | 'done' | 'error'
+type ImportState = 'idle' | 'parsing' | 'review' | 'confirming' | 'syncing' | 'done' | 'error'
 
 function formatGbp(value: number) {
   return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(value)
@@ -28,6 +28,7 @@ export default function PortfolioImportPage() {
   const [error, setError] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [selectedHolders, setSelectedHolders] = useState<string[]>([])
+  const [syncResult, setSyncResult] = useState<{ linked: number; fetched: number } | null>(null)
   const router = useRouter()
 
   async function handleFile(file: File) {
@@ -90,6 +91,17 @@ export default function PortfolioImportPage() {
         throw new Error(data.error || 'Failed to confirm import')
       }
 
+      // Fetch price history in the background while showing a syncing state
+      setState('syncing')
+      try {
+        const syncRes = await fetch('/api/market/sync', { method: 'POST' })
+        if (syncRes.ok) {
+          const s = await syncRes.json() as { linked: number; fetched: number }
+          setSyncResult(s)
+        }
+      } catch {
+        // Sync failure is non-fatal — prices will be caught by the nightly cron
+      }
       setState('done')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
@@ -114,6 +126,23 @@ export default function PortfolioImportPage() {
         : portfolio.holdings.filter(h => selectedHolders.includes(h.accountHolder ?? '')))
     : []
 
+  if (state === 'syncing') {
+    return (
+      <div className="max-w-2xl mx-auto space-y-4">
+        <Card>
+          <CardContent className="pt-6 text-center space-y-4 py-12">
+            <CheckCircle className="h-12 w-12 text-green-500 mx-auto" />
+            <h2 className="text-xl font-semibold">Import saved</h2>
+            <p className="text-muted-foreground animate-pulse">
+              Fetching price history from Yahoo Finance…
+            </p>
+            <p className="text-xs text-muted-foreground">This may take up to 30 seconds for a new portfolio</p>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
   if (state === 'done') {
     return (
       <div className="max-w-2xl mx-auto space-y-4">
@@ -124,9 +153,17 @@ export default function PortfolioImportPage() {
             <p className="text-muted-foreground">
               {portfolio?.holdings.length} holdings imported from {filename}
             </p>
+            {syncResult && (
+              <p className="text-sm text-muted-foreground">
+                {syncResult.linked > 0 && `${syncResult.linked} holding${syncResult.linked !== 1 ? 's' : ''} linked to Yahoo Finance · `}
+                {syncResult.fetched > 0
+                  ? `${syncResult.fetched.toLocaleString()} price points synced`
+                  : 'Price history already up to date'}
+              </p>
+            )}
             <div className="flex gap-3 justify-center">
-              <Button onClick={() => router.push('/portfolio')}>View portfolio</Button>
-              <Button variant="outline" onClick={() => setState('idle')}>Import another</Button>
+              <Button onClick={() => router.push('/performance')}>View performance</Button>
+              <Button variant="outline" onClick={() => router.push('/portfolio')}>View portfolio</Button>
             </div>
           </CardContent>
         </Card>

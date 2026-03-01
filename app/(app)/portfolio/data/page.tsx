@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
-import { CheckCircle2, AlertCircle, Search, X } from 'lucide-react'
+import { CheckCircle2, AlertCircle, Search, X, RefreshCw } from 'lucide-react'
 import Link from 'next/link'
 import { toast } from 'sonner'
 
@@ -55,7 +55,6 @@ function SymbolRow({
     }
   }, [])
 
-  // Debounce search
   useEffect(() => {
     const t = setTimeout(() => { if (open) search(query) }, 400)
     return () => clearTimeout(t)
@@ -86,7 +85,6 @@ function SymbolRow({
 
   return (
     <div className="space-y-2 py-3 border-b last:border-0">
-      {/* Row header */}
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0 flex-1">
           <p className="font-medium text-sm truncate">{row.name || row.symbol}</p>
@@ -104,12 +102,7 @@ function SymbolRow({
                 <CheckCircle2 className="h-3 w-3" />
                 Linked
               </Badge>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 text-xs"
-                onClick={() => setOpen(o => !o)}
-              >
+              <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setOpen(o => !o)}>
                 Change
               </Button>
               <Button
@@ -128,12 +121,7 @@ function SymbolRow({
                 <AlertCircle className="h-3 w-3" />
                 Not linked
               </Badge>
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-7 text-xs"
-                onClick={() => setOpen(o => !o)}
-              >
+              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setOpen(o => !o)}>
                 Link
               </Button>
             </>
@@ -141,7 +129,6 @@ function SymbolRow({
         </div>
       </div>
 
-      {/* Search panel */}
       {open && (
         <div className="space-y-2 pl-2">
           <div className="relative">
@@ -157,7 +144,7 @@ function SymbolRow({
 
           {searching && (
             <div className="space-y-1">
-              {[1,2,3].map(i => <Skeleton key={i} className="h-8 w-full" />)}
+              {[1, 2, 3].map(i => <Skeleton key={i} className="h-8 w-full" />)}
             </div>
           )}
 
@@ -204,15 +191,18 @@ function SymbolRow({
 
 export default function PortfolioDataPage() {
   const [symbols, setSymbols] = useState<TrackedSymbol[]>([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setSyncing] = useState(true)
+  const [syncing, setSyncingPrices] = useState(false)
+  const [syncMsg, setSyncMsg] = useState<string | null>(null)
 
-  useEffect(() => {
-    fetch('/api/market/symbols')
-      .then(r => r.json())
-      .then((data: TrackedSymbol[]) => setSymbols(Array.isArray(data) ? data : []))
-      .catch(() => setSymbols([]))
-      .finally(() => setLoading(false))
+  const loadSymbols = useCallback(async () => {
+    const res  = await fetch('/api/market/symbols')
+    const data = await res.json() as TrackedSymbol[]
+    setSymbols(Array.isArray(data) ? data : [])
+    setSyncing(false)
   }, [])
+
+  useEffect(() => { loadSymbols() }, [loadSymbols])
 
   function handleLinked(symbol: string, yahooSymbol: string | null) {
     setSymbols(prev =>
@@ -220,8 +210,27 @@ export default function PortfolioDataPage() {
     )
   }
 
-  const linked    = symbols.filter(s => s.yahoo_symbol)
-  const unlinked  = symbols.filter(s => !s.yahoo_symbol)
+  async function handleSync() {
+    setSyncingPrices(true)
+    setSyncMsg(null)
+    try {
+      const res = await fetch('/api/market/sync', { method: 'POST' })
+      const data = await res.json() as { linked: number; fetched: number; errors: string[] }
+      const parts: string[] = []
+      if (data.linked > 0) parts.push(`${data.linked} newly linked`)
+      if (data.fetched > 0) parts.push(`${data.fetched.toLocaleString()} price points fetched`)
+      setSyncMsg(parts.length > 0 ? parts.join(' · ') : 'All prices already up to date')
+      // Reload to reflect any newly auto-linked symbols
+      await loadSymbols()
+    } catch {
+      setSyncMsg('Sync failed — please try again')
+    } finally {
+      setSyncingPrices(false)
+    }
+  }
+
+  const linked   = symbols.filter(s => s.yahoo_symbol)
+  const unlinked = symbols.filter(s => !s.yahoo_symbol)
 
   return (
     <div className="space-y-6">
@@ -229,25 +238,28 @@ export default function PortfolioDataPage() {
         <div>
           <h1 className="text-2xl font-bold">Market data</h1>
           <p className="text-sm text-muted-foreground">
-            Link each holding to its Yahoo Finance symbol so daily prices can be fetched.
+            Link each holding to its Yahoo Finance symbol to enable daily price history.
           </p>
         </div>
-        <Button variant="outline" asChild>
-          <Link href="/portfolio">Back to Portfolio</Link>
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={handleSync}
+            disabled={syncing}
+          >
+            <RefreshCw className={`h-4 w-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
+            {syncing ? 'Syncing…' : 'Sync prices'}
+          </Button>
+          <Button variant="ghost" asChild>
+            <Link href="/portfolio">Back</Link>
+          </Button>
+        </div>
       </div>
 
-      {/* Info banner */}
-      <Card className="border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/20">
-        <CardContent className="pt-4 pb-4">
-          <p className="text-sm text-blue-800 dark:text-blue-300">
-            Prices are fetched nightly on weekdays. First history appears within 24 hours of linking.
-            UK mutual funds (OEICs) use symbols starting with <code className="font-mono bg-blue-100 dark:bg-blue-900 px-1 rounded">0P…</code> on Yahoo Finance.
-          </p>
-        </CardContent>
-      </Card>
+      {syncMsg && (
+        <p className="text-sm text-muted-foreground">{syncMsg}</p>
+      )}
 
-      {/* Progress summary */}
       {!loading && symbols.length > 0 && (
         <div className="flex gap-4 text-sm">
           <span className="text-green-600 font-medium">{linked.length} linked</span>
@@ -265,14 +277,12 @@ export default function PortfolioDataPage() {
         <CardContent className="p-0 px-6">
           {loading ? (
             <div className="space-y-3 py-3">
-              {[1,2,3,4].map(i => <Skeleton key={i} className="h-12 w-full" />)}
+              {[1, 2, 3, 4].map(i => <Skeleton key={i} className="h-12 w-full" />)}
             </div>
           ) : symbols.length === 0 ? (
             <div className="py-12 text-center">
               <p className="text-muted-foreground text-sm">No holdings found.</p>
-              <p className="text-muted-foreground text-sm">
-                Import a CSV first to populate your holdings.
-              </p>
+              <p className="text-muted-foreground text-sm">Import a CSV first to populate your holdings.</p>
             </div>
           ) : (
             <div>

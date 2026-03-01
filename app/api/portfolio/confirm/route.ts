@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { z } from 'zod'
+import { syncUserHoldings } from '@/lib/market/sync'
 
 const ConfirmSchema = z.object({
   portfolio: z.object({
@@ -156,5 +157,8 @@ export async function POST(request: NextRequest) {
     status:        'success',
   })
 
-  return NextResponse.json({ snapshotId: snapshot.id, holdingsCount: portfolio.holdings.length })
+  // 6. Auto-link any unlinked symbols to Yahoo Finance (fast — no price fetch yet)
+  const { linked } = await syncUserHoldings(user.id, supabase, { onlyAutoLink: true })
+
+  return NextResponse.json({ snapshotId: snapshot.id, holdingsCount: portfolio.holdings.length, linked })
 }
