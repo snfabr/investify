@@ -151,9 +151,10 @@ create table tracked_symbols (
   yahoo_symbol text,
   track_reason text not null,
   is_active boolean default true,
-  created_at timestamptz default now(),
-  unique(symbol, coalesce(user_id, '00000000-0000-0000-0000-000000000000'::uuid))
+  created_at timestamptz default now()
 );
+
+create unique index idx_tracked_symbols_unique on tracked_symbols(symbol, coalesce(user_id, '00000000-0000-0000-0000-000000000000'::uuid));
 
 -- Market data cache (for real-time/intraday quotes, short TTL)
 create table market_data_cache (
