@@ -65,7 +65,8 @@ function extractExportDate(lines: string[]): string {
  *
  * We find every section by locating rows where column 0 === "Type",
  * then keep only "Asset" rows where Product === "Investment ISA".
- * Cash comes from matching "Account" rows (Cash available column).
+ * Cash comes from matching "Account" rows (Cash available column),
+ * stored as individual Cash holdings tagged to each account holder.
  */
 export const fidelityCsvAdapter: BrokerAdapter = {
   name: 'fidelity_uk',
@@ -101,7 +102,8 @@ export const fidelityCsvAdapter: BrokerAdapter = {
 
     // ── Process each section ─────────────────────────────────────────────────
     const holdings: BrokerHolding[] = []
-    let cashGbp = 0
+    // Cash per account holder: Map<accountHolder, cashGbp>
+    const cashByHolder = new Map<string, number>()
 
     for (let s = 0; s < headerIndices.length; s++) {
       const headerRow = rows[headerIndices[s]]
@@ -119,16 +121,22 @@ export const fidelityCsvAdapter: BrokerAdapter = {
       const sectionRows = rows.slice(headerIndices[s] + 1, sectionEnd)
 
       for (const row of sectionRows) {
-        const type    = row[col['Type']]?.trim()
-        const product = row[col['Product']]?.trim() ?? ''
+        const type          = row[col['Type']]?.trim()
+        const product       = row[col['Product']]?.trim() ?? ''
+        const accountHolder = row[col['Account holder']]?.trim() ?? ''
 
         // Only process Investment ISA rows
         if (product !== 'Investment ISA') continue
 
         if (type === 'Account') {
-          // Accumulate ISA cash balances
+          // Accumulate ISA cash per account holder
           const cash = parseNum(row[col['Cash available']])
-          cashGbp += cash
+          if (cash > 0) {
+            cashByHolder.set(
+              accountHolder,
+              (cashByHolder.get(accountHolder) ?? 0) + cash
+            )
+          }
           continue
         }
 
@@ -163,8 +171,27 @@ export const fidelityCsvAdapter: BrokerAdapter = {
           gainLossGbp,
           gainLossPct,
           currency:        'GBP',
+          accountHolder,
         })
       }
+    }
+
+    // ── Add cash as holdings, one row per account holder ─────────────────────
+    for (const [holder, amount] of cashByHolder) {
+      holdings.push({
+        symbol:          'CASH',
+        name:            'Cash',
+        instrumentType:  'cash',
+        quantity:        1,
+        currentPriceGbp: amount,
+        currentValueGbp: amount,
+        costBasisGbp:    amount,
+        avgCostGbp:      amount,
+        gainLossGbp:     0,
+        gainLossPct:     0,
+        currency:        'GBP',
+        accountHolder:   holder,
+      })
     }
 
     if (holdings.length === 0) {
@@ -174,12 +201,13 @@ export const fidelityCsvAdapter: BrokerAdapter = {
       )
     }
 
-    // Deduplicate: if the same fund appears across multiple ISA accounts,
-    // merge quantities and values.
+    // ── Deduplicate by (symbol, accountHolder) ───────────────────────────────
+    // Same fund across multiple imports of the same ISA account gets merged.
     const merged = new Map<string, BrokerHolding>()
     for (const h of holdings) {
-      if (merged.has(h.symbol)) {
-        const existing = merged.get(h.symbol)!
+      const key = `${h.symbol}::${h.accountHolder ?? ''}`
+      if (merged.has(key)) {
+        const existing = merged.get(key)!
         existing.quantity        += h.quantity
         existing.currentValueGbp += h.currentValueGbp
         existing.costBasisGbp    += h.costBasisGbp
@@ -192,17 +220,20 @@ export const fidelityCsvAdapter: BrokerAdapter = {
         existing.gainLossPct = existing.costBasisGbp > 0
           ? (existing.gainLossGbp / existing.costBasisGbp) * 100 : 0
       } else {
-        merged.set(h.symbol, { ...h })
+        merged.set(key, { ...h })
       }
     }
 
     const finalHoldings = Array.from(merged.values())
-    const totalInvestmentsGbp = finalHoldings.reduce((s, h) => s + h.currentValueGbp, 0)
+    const totalValueGbp = finalHoldings.reduce((s, h) => s + h.currentValueGbp, 0)
+    const cashGbp       = finalHoldings
+      .filter(h => h.instrumentType === 'cash')
+      .reduce((s, h) => s + h.currentValueGbp, 0)
 
     return {
       broker:        'fidelity_uk',
       accountType:   'S&S ISA',
-      totalValueGbp: totalInvestmentsGbp + cashGbp,
+      totalValueGbp,
       cashGbp,
       holdings:      finalHoldings,
       asOfDate,

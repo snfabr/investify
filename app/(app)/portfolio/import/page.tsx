@@ -27,6 +27,7 @@ export default function PortfolioImportPage() {
   const [fileSize, setFileSize] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
+  const [selectedHolders, setSelectedHolders] = useState<string[]>([])
   const router = useRouter()
 
   async function handleFile(file: File) {
@@ -53,6 +54,7 @@ export default function PortfolioImportPage() {
       }
 
       setPortfolio(data.portfolio)
+      setSelectedHolders([])
       setState('review')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
@@ -94,6 +96,23 @@ export default function PortfolioImportPage() {
       setState('error')
     }
   }
+
+  function toggleHolder(name: string) {
+    setSelectedHolders(prev =>
+      prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name]
+    )
+  }
+
+  // Derive account holders and filtered holdings
+  const accountHolders = portfolio
+    ? [...new Set(portfolio.holdings.map(h => h.accountHolder).filter(Boolean))].sort() as string[]
+    : []
+
+  const visibleHoldings: BrokerHolding[] = portfolio
+    ? (selectedHolders.length === 0
+        ? portfolio.holdings
+        : portfolio.holdings.filter(h => selectedHolders.includes(h.accountHolder ?? '')))
+    : []
 
   if (state === 'done') {
     return (
@@ -184,50 +203,93 @@ export default function PortfolioImportPage() {
                 Confirm the holdings below match your portfolio, then click Import to save.
               </CardDescription>
             </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-3 gap-4 mb-6">
+            <CardContent className="space-y-6">
+              {/* Summary stats for the full import (always shows totals) */}
+              <div className="grid grid-cols-3 gap-4">
                 <div className="bg-muted rounded-lg p-4">
                   <p className="text-xs text-muted-foreground">Total value</p>
                   <p className="text-lg font-bold">{formatGbp(portfolio.totalValueGbp)}</p>
                 </div>
                 <div className="bg-muted rounded-lg p-4">
-                  <p className="text-xs text-muted-foreground">Holdings</p>
+                  <p className="text-xs text-muted-foreground">Holdings (incl. cash)</p>
                   <p className="text-lg font-bold">{portfolio.holdings.length}</p>
                 </div>
                 <div className="bg-muted rounded-lg p-4">
-                  <p className="text-xs text-muted-foreground">Cash</p>
+                  <p className="text-xs text-muted-foreground">Cash available</p>
                   <p className="text-lg font-bold">{formatGbp(portfolio.cashGbp)}</p>
                 </div>
               </div>
 
+              {/* Account holder filter */}
+              {accountHolders.length > 1 && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm text-muted-foreground">Show:</span>
+                  <Button
+                    size="sm"
+                    variant={selectedHolders.length === 0 ? 'default' : 'outline'}
+                    onClick={() => setSelectedHolders([])}
+                  >
+                    All accounts
+                  </Button>
+                  {accountHolders.map(name => (
+                    <Button
+                      key={name}
+                      size="sm"
+                      variant={selectedHolders.includes(name) ? 'default' : 'outline'}
+                      onClick={() => toggleHolder(name)}
+                    >
+                      {name}
+                    </Button>
+                  ))}
+                </div>
+              )}
+
+              {/* Holdings table */}
               <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead>Name</TableHead>
                     <TableHead>Symbol</TableHead>
                     <TableHead>Type</TableHead>
+                    {accountHolders.length > 1 && <TableHead>Holder</TableHead>}
                     <TableHead className="text-right">Qty</TableHead>
                     <TableHead className="text-right">Value</TableHead>
                     <TableHead className="text-right">Gain/Loss</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {portfolio.holdings.map((h: BrokerHolding) => (
-                    <TableRow key={h.symbol}>
-                      <TableCell className="font-medium max-w-48 truncate">{h.name}</TableCell>
-                      <TableCell>
-                        <Badge variant="outline" className="font-mono text-xs">{h.symbol}</Badge>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="secondary">{h.instrumentType}</Badge>
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums">{h.quantity.toFixed(4)}</TableCell>
-                      <TableCell className="text-right tabular-nums">{formatGbp(h.currentValueGbp)}</TableCell>
-                      <TableCell className={`text-right tabular-nums ${h.gainLossPct >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                        {formatPct(h.gainLossPct)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                  {visibleHoldings.map((h: BrokerHolding) => {
+                    const isCash = h.instrumentType === 'cash'
+                    return (
+                      <TableRow key={`${h.symbol}-${h.accountHolder}`}>
+                        <TableCell className="font-medium max-w-48 truncate">{h.name}</TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className="font-mono text-xs">{h.symbol}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="secondary">{h.instrumentType}</Badge>
+                        </TableCell>
+                        {accountHolders.length > 1 && (
+                          <TableCell className="text-sm text-muted-foreground">
+                            {h.accountHolder?.split(' ')[0] ?? '—'}
+                          </TableCell>
+                        )}
+                        <TableCell className="text-right tabular-nums">
+                          {isCash ? '—' : h.quantity.toFixed(4)}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {formatGbp(h.currentValueGbp)}
+                        </TableCell>
+                        <TableCell className={`text-right tabular-nums ${
+                          isCash
+                            ? 'text-muted-foreground'
+                            : h.gainLossPct >= 0 ? 'text-green-600' : 'text-red-600'
+                        }`}>
+                          {isCash ? '—' : formatPct(h.gainLossPct)}
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })}
                 </TableBody>
               </Table>
             </CardContent>

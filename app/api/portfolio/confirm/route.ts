@@ -25,6 +25,7 @@ const ConfirmSchema = z.object({
       gainLossPct:     z.number(),
       sector:          z.string().optional(),
       currency:        z.string(),
+      accountHolder:   z.string().optional(),
     })),
   }),
   filename: z.string(),
@@ -92,6 +93,7 @@ export async function POST(request: NextRequest) {
     cost_basis_gbp: h.costBasisGbp,
     gain_loss_gbp:  h.gainLossGbp,
     gain_loss_pct:  h.gainLossPct,
+    account_holder: h.accountHolder || '',
     allocation_pct: portfolio.totalValueGbp > 0
       ? (h.currentValueGbp / portfolio.totalValueGbp) * 100
       : 0,
@@ -126,10 +128,11 @@ export async function POST(request: NextRequest) {
           gain_loss_gbp:    h.gainLossGbp,
           gain_loss_pct:    h.gainLossPct,
           currency:         h.currency,
+          account_holder:   h.accountHolder || '',
           is_active:        true,
           last_import_at:   now,
         },
-        { onConflict: 'user_id,symbol' }
+        { onConflict: 'user_id,symbol,account_holder' }
       )
   }
 

@@ -13,6 +13,7 @@ export interface BrokerHolding {
   gainLossPct: number
   sector?: string
   currency: string
+  accountHolder?: string
 }
 
 export interface BrokerPortfolio {
