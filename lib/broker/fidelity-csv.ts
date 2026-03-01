@@ -1,186 +1,210 @@
 import Papa from 'papaparse'
 import type { BrokerAdapter, BrokerHolding, BrokerPortfolio } from './types'
 
-// Fidelity UK CSV column names (may vary by export format)
-const COLUMN_ALIASES: Record<string, string[]> = {
-  name:        ['Stock', 'Security Name', 'Name', 'Description'],
-  sedol:       ['SEDOL', 'Sedol'],
-  isin:        ['ISIN'],
-  units:       ['Units', 'Quantity', 'Shares'],
-  price:       ['Price (p)', 'Price', 'Price (GBp)', 'Current Price'],
-  value:       ['Value (£)', 'Value', 'Market Value (£)', 'Market Value'],
-  costBasis:   ['Book Cost (£)', 'Book Cost', 'Cost (£)', 'Cost Basis'],
-  gainLoss:    ['Gain/Loss (£)', 'Gain/Loss £', 'Unrealised Gain/Loss (£)'],
-  gainLossPct: ['Gain/Loss (%)', 'Gain/Loss %', 'Unrealised Gain/Loss (%)'],
-  account:     ['Account', 'Account Name', 'Account Type'],
-  symbol:      ['Ticker', 'Symbol', 'Epic', 'TIDM'],
-}
+// ── Helpers ─────────────────────────────────────────────────────────────────
 
-function findColumn(headers: string[], aliases: string[]): string | null {
-  const normalized = headers.map(h => h.trim())
-  for (const alias of aliases) {
-    const match = normalized.find(h => h.toLowerCase() === alias.toLowerCase())
-    if (match) return match
-  }
-  return null
-}
-
-function parseGbp(value: string | undefined | null): number {
+function parseNum(value: string | undefined | null): number {
   if (!value) return 0
-  // Remove £, commas, whitespace
-  const cleaned = String(value).replace(/[£,\s]/g, '').trim()
-  const num = parseFloat(cleaned)
-  return isNaN(num) ? 0 : num
+  const cleaned = String(value).replace(/[£,+\s]/g, '').trim()
+  const n = parseFloat(cleaned)
+  return isNaN(n) ? 0 : n
 }
 
-function parsePenceToGbp(value: string | undefined | null): number {
-  // Fidelity often reports price in pence
-  const pence = parseGbp(value)
-  return pence / 100
-}
-
-function isPenceColumn(columnName: string): boolean {
-  return columnName.toLowerCase().includes('(p)') ||
-         columnName.toLowerCase().includes('gbp') ||
-         columnName.toLowerCase().includes('pence')
-}
-
-function inferInstrumentType(name: string, sedol?: string): BrokerHolding['instrumentType'] {
-  const lowerName = name.toLowerCase()
-  if (lowerName.includes('etf') || lowerName.includes('exchange traded')) return 'etf'
-  if (lowerName.includes('investment trust') || lowerName.includes('inv trust')) return 'investment_trust'
-  if (lowerName.includes('fund') || lowerName.includes('feeder')) return 'fund'
-  if (lowerName.includes('gilt') || lowerName.includes('bond') || lowerName.includes('treasury')) return 'bond'
-  if (lowerName.includes('cash') || lowerName.includes('money market')) return 'cash'
-  // SEDOL starting with B or higher is often a fund
-  if (sedol && sedol.match(/^[B-Z]/i)) return 'fund'
+function inferInstrumentType(name: string): BrokerHolding['instrumentType'] {
+  const l = name.toLowerCase()
+  if (l.includes('etf') || l.includes('exchange traded')) return 'etf'
+  if (l.includes('investment trust') || l.includes('inv trust')) return 'investment_trust'
+  if (l.includes('gilt') || l.includes('treasury')) return 'bond'
+  if (l.includes('fund') || l.includes('feeder') || l.includes('accumulation') || l.includes(' acc')) return 'fund'
+  if (l.includes('cash') || l.includes('money market')) return 'cash'
   return 'stock'
 }
 
-function isIsaAccount(accountValue: string | undefined): boolean {
-  if (!accountValue) return true // If no account column, assume ISA
-  const lower = accountValue.toLowerCase()
-  return lower.includes('isa') || lower.includes('stocks') || lower.includes('shares')
+/**
+ * Turn a fund name into a stable short symbol — used as the internal
+ * identifier since Fidelity's export contains no ticker/SEDOL/ISIN.
+ *
+ * "Fidelity Global Dividend Fund W-Accumulation (UK)" →
+ *   "FIDELITY_GLOBAL_DIVIDEND_W"
+ */
+function nameToSymbol(name: string): string {
+  const STOP = ['fund', 'accumulation', 'feeder', 'class', 'limited',
+                'management', 'asset', 'managers', 'securities', 'the',
+                'and', 'for', 'of', 'uk']
+  const words = name
+    .replace(/[()&]/g, ' ')
+    .split(/[\s\-]+/)
+    .map(w => w.replace(/[^A-Za-z0-9]/g, ''))
+    .filter(w => w.length > 1 && !STOP.includes(w.toLowerCase()))
+  return words.join('_').toUpperCase().slice(0, 40)
 }
 
+/** Extract the export date from the preamble lines, e.g. "Export date,28/02/2026" */
+function extractExportDate(lines: string[]): string {
+  for (const line of lines.slice(0, 10)) {
+    const m = line.match(/export date[,\s]+(\d{2}\/\d{2}\/\d{4})/i)
+    if (m) {
+      const [day, month, year] = m[1].split('/')
+      return `${year}-${month}-${day}`
+    }
+  }
+  return new Date().toISOString().split('T')[0]
+}
+
+// ── Parser ───────────────────────────────────────────────────────────────────
+
+/**
+ * Fidelity UK "AccountSummary.csv" parser.
+ *
+ * The file has a complex structure:
+ *
+ *   Lines 1–N  — metadata (client name, export date, overview totals)
+ *   Header row — "Type,Holdings,Account number,Product,..."
+ *   Data rows  — Type = "Account" (summary) or "Asset" (holding)
+ *   ... repeated for each section
+ *
+ * We find every section by locating rows where column 0 === "Type",
+ * then keep only "Asset" rows where Product === "Investment ISA".
+ * Cash comes from matching "Account" rows (Cash available column).
+ */
 export const fidelityCsvAdapter: BrokerAdapter = {
   name: 'fidelity_uk',
 
   async parseImport(data: string): Promise<BrokerPortfolio> {
-    const result = Papa.parse<Record<string, string>>(data, {
-      header: true,
+    const rawLines = data.split(/\r?\n/)
+    const asOfDate = extractExportDate(rawLines)
+
+    // Parse the whole file as a flat array of string arrays
+    const parsed = Papa.parse<string[]>(data, {
+      header: false,
       skipEmptyLines: true,
-      transformHeader: (header) => header.trim(),
     })
 
-    if (result.errors.length > 0) {
-      const fatal = result.errors.filter(e => e.type === 'Delimiter' || e.type === 'Quotes')
-      if (fatal.length > 0) {
-        throw new Error(`CSV parse error: ${fatal[0].message}`)
-      }
+    if (parsed.errors.some(e => e.type === 'Delimiter')) {
+      throw new Error('Could not parse CSV — unexpected format')
     }
 
-    const rows = result.data
-    if (rows.length === 0) {
-      throw new Error('CSV file appears to be empty or has no data rows')
-    }
+    const rows: string[][] = parsed.data as string[][]
 
-    const headers = Object.keys(rows[0])
+    // ── Find section header rows ─────────────────────────────────────────────
+    // A header row has "Type" as the first cell.
+    const headerIndices: number[] = []
+    rows.forEach((row, i) => {
+      if (row[0]?.trim() === 'Type') headerIndices.push(i)
+    })
 
-    // Resolve columns
-    const colName     = findColumn(headers, COLUMN_ALIASES.name)
-    const colSedol    = findColumn(headers, COLUMN_ALIASES.sedol)
-    const colIsin     = findColumn(headers, COLUMN_ALIASES.isin)
-    const colUnits    = findColumn(headers, COLUMN_ALIASES.units)
-    const colPrice    = findColumn(headers, COLUMN_ALIASES.price)
-    const colValue    = findColumn(headers, COLUMN_ALIASES.value)
-    const colCost     = findColumn(headers, COLUMN_ALIASES.costBasis)
-    const colGainLoss = findColumn(headers, COLUMN_ALIASES.gainLoss)
-    const colGainPct  = findColumn(headers, COLUMN_ALIASES.gainLossPct)
-    const colAccount  = findColumn(headers, COLUMN_ALIASES.account)
-    const colSymbol   = findColumn(headers, COLUMN_ALIASES.symbol)
-
-    if (!colName || !colValue) {
+    if (headerIndices.length === 0) {
       throw new Error(
-        `Could not find required columns in CSV. Expected "Stock/Name" and "Value". ` +
-        `Found: ${headers.join(', ')}`
+        'Could not find data table in CSV. Expected Fidelity "AccountSummary.csv" format.'
       )
     }
 
-    const priceIsPence = colPrice ? isPenceColumn(colPrice) : false
-
+    // ── Process each section ─────────────────────────────────────────────────
     const holdings: BrokerHolding[] = []
-    let totalValueGbp = 0
     let cashGbp = 0
-    const asOfDate = new Date().toISOString().split('T')[0]
 
-    for (const row of rows) {
-      const accountValue = colAccount ? row[colAccount] : undefined
+    for (let s = 0; s < headerIndices.length; s++) {
+      const headerRow = rows[headerIndices[s]]
+      const sectionEnd = s + 1 < headerIndices.length
+        ? headerIndices[s + 1]
+        : rows.length
 
-      // Filter to ISA account only
-      if (!isIsaAccount(accountValue)) continue
+      // Map column name → index for this section
+      const col: Record<string, number> = {}
+      headerRow.forEach((h, i) => { col[h.trim()] = i })
 
-      const name = colName ? (row[colName] || '').trim() : ''
-      if (!name) continue
+      const required = ['Type', 'Holdings', 'Value (£)', 'Latest price (pence/cents/yen)', 'Quantity']
+      if (!required.every(k => k in col)) continue  // Skip malformed/overview sections
 
-      const valueGbp = parseGbp(colValue ? row[colValue] : '0')
-      const costGbp  = parseGbp(colCost ? row[colCost] : '0')
-      const units    = parseFloat((colUnits ? row[colUnits] : '0') || '0') || 0
+      const sectionRows = rows.slice(headerIndices[s] + 1, sectionEnd)
 
-      // Cash row detection
-      const lowerName = name.toLowerCase()
-      if (lowerName.includes('cash') || lowerName.includes('money market') || lowerName.includes('gbp cash')) {
-        cashGbp += valueGbp
-        continue
+      for (const row of sectionRows) {
+        const type    = row[col['Type']]?.trim()
+        const product = row[col['Product']]?.trim() ?? ''
+
+        // Only process Investment ISA rows
+        if (product !== 'Investment ISA') continue
+
+        if (type === 'Account') {
+          // Accumulate ISA cash balances
+          const cash = parseNum(row[col['Cash available']])
+          cashGbp += cash
+          continue
+        }
+
+        if (type !== 'Asset') continue
+
+        const name = row[col['Holdings']]?.trim() ?? ''
+        if (!name || name.toLowerCase() === 'cash') continue
+
+        // Price is in pence — divide by 100 for GBP
+        const pricePence = parseNum(row[col['Latest price (pence/cents/yen)']])
+        const priceGbp   = pricePence / 100
+
+        const quantity    = parseNum(row[col['Quantity']])
+        const valueGbp    = parseNum(row[col['Value (£)']])
+        const costBasis   = parseNum(row[col['Book cost (£)']])
+        const gainLossGbp = parseNum(row[col['Gain/loss (£)']])
+        const gainLossPct = parseNum(row[col['Gain/loss (%)']])
+
+        const effectivePrice = priceGbp > 0 ? priceGbp
+          : (quantity > 0 ? valueGbp / quantity : 0)
+        const avgCostGbp = quantity > 0 && costBasis > 0 ? costBasis / quantity : effectivePrice
+
+        holdings.push({
+          symbol:          nameToSymbol(name),
+          name,
+          instrumentType:  inferInstrumentType(name),
+          quantity,
+          currentPriceGbp: effectivePrice,
+          currentValueGbp: valueGbp,
+          costBasisGbp:    costBasis,
+          avgCostGbp,
+          gainLossGbp,
+          gainLossPct,
+          currency:        'GBP',
+        })
       }
-
-      const rawPrice = colPrice ? row[colPrice] : ''
-      const priceGbp = priceIsPence ? parsePenceToGbp(rawPrice) : parseGbp(rawPrice)
-      const effectivePriceGbp = priceGbp > 0 ? priceGbp : (units > 0 ? valueGbp / units : 0)
-
-      const gainLossGbp = parseGbp(colGainLoss ? row[colGainLoss] : '0')
-      const gainLossPct = parseFloat(
-        (colGainPct ? row[colGainPct] : '0')?.replace('%', '') || '0'
-      ) || 0
-
-      const sedol  = colSedol  ? (row[colSedol] || '').trim()  : undefined
-      const isin   = colIsin   ? (row[colIsin] || '').trim()   : undefined
-      // Fidelity often doesn't include ticker — use SEDOL as fallback symbol
-      const symbol = colSymbol ? (row[colSymbol] || '').trim() : (sedol || name.slice(0, 12).replace(/\s+/g, '_').toUpperCase())
-
-      const avgCostGbp = units > 0 && costGbp > 0 ? costGbp / units : effectivePriceGbp
-
-      holdings.push({
-        symbol,
-        name,
-        isin:             isin || undefined,
-        sedol:            sedol || undefined,
-        instrumentType:   inferInstrumentType(name, sedol),
-        quantity:         units,
-        currentPriceGbp:  effectivePriceGbp,
-        currentValueGbp:  valueGbp,
-        costBasisGbp:     costGbp,
-        avgCostGbp,
-        gainLossGbp,
-        gainLossPct,
-        currency:         'GBP',
-      })
-
-      totalValueGbp += valueGbp
     }
 
     if (holdings.length === 0) {
       throw new Error(
-        'No holdings found in CSV. Ensure this is a Fidelity ISA portfolio export and try again.'
+        'No Investment ISA holdings found in CSV. ' +
+        'Make sure this is a Fidelity "AccountSummary.csv" export.'
       )
     }
+
+    // Deduplicate: if the same fund appears across multiple ISA accounts,
+    // merge quantities and values.
+    const merged = new Map<string, BrokerHolding>()
+    for (const h of holdings) {
+      if (merged.has(h.symbol)) {
+        const existing = merged.get(h.symbol)!
+        existing.quantity        += h.quantity
+        existing.currentValueGbp += h.currentValueGbp
+        existing.costBasisGbp    += h.costBasisGbp
+        existing.gainLossGbp     += h.gainLossGbp
+        // Recalculate averages
+        existing.currentPriceGbp = existing.quantity > 0
+          ? existing.currentValueGbp / existing.quantity : 0
+        existing.avgCostGbp = existing.quantity > 0
+          ? existing.costBasisGbp / existing.quantity : 0
+        existing.gainLossPct = existing.costBasisGbp > 0
+          ? (existing.gainLossGbp / existing.costBasisGbp) * 100 : 0
+      } else {
+        merged.set(h.symbol, { ...h })
+      }
+    }
+
+    const finalHoldings = Array.from(merged.values())
+    const totalInvestmentsGbp = finalHoldings.reduce((s, h) => s + h.currentValueGbp, 0)
 
     return {
       broker:        'fidelity_uk',
       accountType:   'S&S ISA',
-      totalValueGbp: totalValueGbp + cashGbp,
+      totalValueGbp: totalInvestmentsGbp + cashGbp,
       cashGbp,
-      holdings,
+      holdings:      finalHoldings,
       asOfDate,
       importMethod:  'csv',
     }
