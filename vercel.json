@@ -1,7 +1,6 @@
 {
   "crons": [
     { "path": "/api/cron/weekly-plan",    "schedule": "0 7 * * 1" },
-    { "path": "/api/cron/event-monitor",  "schedule": "0 8,12,16,20 * * 1-5" },
     { "path": "/api/cron/price-snapshot", "schedule": "0 21 * * 1-5" }
   ]
 }
