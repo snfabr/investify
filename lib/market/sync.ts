@@ -1,4 +1,4 @@
-import yahooFinance from 'yahoo-finance2'
+import yahooFinance from './yahoo'
 import { createServiceClient } from '@/lib/supabase/server'
 
 // ── Types ─────────────────────────────────────────────────────────────────────

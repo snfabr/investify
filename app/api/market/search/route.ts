@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import yahooFinance from 'yahoo-finance2'
+import yahooFinance from '@/lib/market/yahoo'
 
 const ALLOWED_TYPES = new Set(['MUTUALFUND', 'ETF', 'EQUITY'])
 
@@ -15,10 +15,11 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const result = await yahooFinance.search(q, {
-      quotesCount: 8,
-      newsCount: 0,
-    }) as { quotes?: Array<{
+    const result = await yahooFinance.search(
+      q,
+      { quotesCount: 8, newsCount: 0 },
+      { validateResult: false },
+    ) as { quotes?: Array<{
       symbol?: string
       shortname?: string
       longname?: string
@@ -39,7 +40,9 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json(quotes)
   } catch (err) {
-    console.error('[market/search]', err)
-    return NextResponse.json({ error: 'Search failed' }, { status: 500 })
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[market/search]', msg)
+    // Return the real error so it's visible during debugging
+    return NextResponse.json({ error: msg }, { status: 500 })
   }
 }

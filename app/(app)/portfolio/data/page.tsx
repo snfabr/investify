@@ -38,17 +38,25 @@ function SymbolRow({
   const [query, setQuery]         = useState('')
   const [results, setResults]     = useState<SearchResult[]>([])
   const [searching, setSearching] = useState(false)
+  const [searchErr, setSearchErr] = useState<string | null>(null)
   const [saving, setSaving]       = useState(false)
   const [open, setOpen]           = useState(false)
 
   const search = useCallback(async (q: string) => {
-    if (q.length < 2) { setResults([]); return }
+    if (q.length < 2) { setResults([]); setSearchErr(null); return }
     setSearching(true)
+    setSearchErr(null)
     try {
       const res = await fetch(`/api/market/search?q=${encodeURIComponent(q)}`)
-      const data = await res.json() as SearchResult[]
-      setResults(Array.isArray(data) ? data : [])
-    } catch {
+      const data = await res.json() as SearchResult[] | { error: string }
+      if (!res.ok || 'error' in data) {
+        setSearchErr((data as { error: string }).error ?? 'Search failed')
+        setResults([])
+      } else {
+        setResults(Array.isArray(data) ? data : [])
+      }
+    } catch (err) {
+      setSearchErr(err instanceof Error ? err.message : 'Search failed')
       setResults([])
     } finally {
       setSearching(false)
@@ -170,7 +178,9 @@ function SymbolRow({
           )}
 
           {!searching && query.length >= 2 && results.length === 0 && (
-            <p className="text-xs text-muted-foreground px-1">No results — try a different search term</p>
+            <p className="text-xs text-destructive px-1">
+              {searchErr ? `Error: ${searchErr}` : 'No results — try a different search term'}
+            </p>
           )}
 
           <Button
@@ -219,6 +229,7 @@ export default function PortfolioDataPage() {
       const parts: string[] = []
       if (data.linked > 0) parts.push(`${data.linked} newly linked`)
       if (data.fetched > 0) parts.push(`${data.fetched.toLocaleString()} price points fetched`)
+      if (data.errors?.length > 0) parts.push(`Errors: ${data.errors.slice(0, 2).join('; ')}`)
       setSyncMsg(parts.length > 0 ? parts.join(' · ') : 'All prices already up to date')
       // Reload to reflect any newly auto-linked symbols
       await loadSymbols()
