@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from 'react'
 import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
+  ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend,
 } from 'recharts'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -34,9 +34,23 @@ interface Holding {
   account_holder: string
 }
 
+interface DailyValue {
+  date: string
+  estimated_value: number
+}
+
+// Unified chart data point — all fields optional so we can merge two series
+interface ChartPoint {
+  date: string                   // ISO date (canonical key)
+  total_value_gbp?: number
+  total_cost_gbp?: number
+  estimated_value?: number
+}
+
 interface Props {
   snapshots: Snapshot[]
   holdings: Holding[]
+  dailyValues?: DailyValue[]
 }
 
 // ── Formatters ───────────────────────────────────────────────────────────────
@@ -72,30 +86,54 @@ function ChartTooltip({ active, payload, label }: {
   label?: string
 }) {
   if (!active || !payload?.length) return null
-  const value   = payload.find(p => p.name === 'Portfolio value')?.value ?? 0
-  const cost    = payload.find(p => p.name === 'Invested')?.value ?? 0
-  const gain    = value - cost
-  const gainPct = cost > 0 ? (gain / cost) * 100 : 0
 
-  return (
-    <div className="bg-background border rounded-lg shadow-lg px-4 py-3 text-sm space-y-1 min-w-48">
-      <p className="font-semibold text-muted-foreground">{label ? fmtDate(label, 'long') : ''}</p>
-      <div className="flex justify-between gap-6">
-        <span className="text-muted-foreground">Portfolio value</span>
-        <span className="font-medium">{fmtFull(value)}</span>
+  const value    = payload.find(p => p.name === 'Portfolio value')?.value
+  const cost     = payload.find(p => p.name === 'Invested')?.value
+  const estimate = payload.find(p => p.name === 'Daily estimate')?.value
+
+  // Snapshot point
+  if (value != null) {
+    const gain    = value - (cost ?? 0)
+    const gainPct = (cost ?? 0) > 0 ? (gain / (cost ?? 0)) * 100 : 0
+    return (
+      <div className="bg-background border rounded-lg shadow-lg px-4 py-3 text-sm space-y-1 min-w-48">
+        <p className="font-semibold text-muted-foreground">{label ? fmtDate(label, 'long') : ''}</p>
+        <div className="flex justify-between gap-6">
+          <span className="text-muted-foreground">Portfolio value</span>
+          <span className="font-medium">{fmtFull(value)}</span>
+        </div>
+        {cost != null && (
+          <div className="flex justify-between gap-6">
+            <span className="text-muted-foreground">Invested</span>
+            <span className="font-medium">{fmtFull(cost)}</span>
+          </div>
+        )}
+        {cost != null && (
+          <div className="flex justify-between gap-6 border-t pt-1">
+            <span className="text-muted-foreground">Gain / Loss</span>
+            <span className={`font-semibold ${gain >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+              {fmtFull(gain)} ({fmtPct(gainPct)})
+            </span>
+          </div>
+        )}
       </div>
-      <div className="flex justify-between gap-6">
-        <span className="text-muted-foreground">Invested</span>
-        <span className="font-medium">{fmtFull(cost)}</span>
+    )
+  }
+
+  // Daily-estimate-only point
+  if (estimate != null) {
+    return (
+      <div className="bg-background border rounded-lg shadow-lg px-4 py-3 text-sm space-y-1 min-w-40">
+        <p className="font-semibold text-muted-foreground">{label ? fmtDate(label, 'long') : ''}</p>
+        <div className="flex justify-between gap-6">
+          <span className="text-muted-foreground">Daily estimate</span>
+          <span className="font-medium">{fmtFull(estimate)}</span>
+        </div>
       </div>
-      <div className="flex justify-between gap-6 border-t pt-1">
-        <span className="text-muted-foreground">Gain / Loss</span>
-        <span className={`font-semibold ${gain >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-          {fmtFull(gain)} ({fmtPct(gainPct)})
-        </span>
-      </div>
-    </div>
-  )
+    )
+  }
+
+  return null
 }
 
 // ── Time range filter ────────────────────────────────────────────────────────
@@ -110,22 +148,69 @@ function filterByRange(snapshots: Snapshot[], range: Range): Snapshot[] {
     : range === '1Y' ? 12 : range === '2Y' ? 24 : 60
   const cutoff = new Date(now.getFullYear(), now.getMonth() - months, now.getDate())
   const filtered = snapshots.filter(s => new Date(s.snapshot_date) >= cutoff)
-  // Always include at least the earliest available point for context
   return filtered.length > 0 ? filtered : snapshots.slice(-1)
+}
+
+function filterDailyByRange(daily: DailyValue[], range: Range): DailyValue[] {
+  if (range === 'All') return daily
+  const now = new Date()
+  const months = range === '1M' ? 1 : range === '3M' ? 3 : range === '6M' ? 6
+    : range === '1Y' ? 12 : range === '2Y' ? 24 : 60
+  const cutoff = new Date(now.getFullYear(), now.getMonth() - months, now.getDate())
+  return daily.filter(d => new Date(d.date) >= cutoff)
+}
+
+// ── Merge snapshots + daily values into a unified chart series ───────────────
+
+function mergeChartData(snapshots: Snapshot[], daily: DailyValue[]): ChartPoint[] {
+  const map = new Map<string, ChartPoint>()
+
+  // Add daily estimates first
+  for (const d of daily) {
+    map.set(d.date, { date: d.date, estimated_value: d.estimated_value })
+  }
+
+  // Overlay snapshot data (these take priority for their dates)
+  for (const s of snapshots) {
+    const existing = map.get(s.snapshot_date) ?? { date: s.snapshot_date }
+    map.set(s.snapshot_date, {
+      ...existing,
+      date:            s.snapshot_date,
+      total_value_gbp: s.total_value_gbp,
+      total_cost_gbp:  s.total_cost_gbp,
+    })
+  }
+
+  return [...map.values()].sort((a, b) => a.date.localeCompare(b.date))
 }
 
 // ── Main component ───────────────────────────────────────────────────────────
 
-export function PerformanceView({ snapshots, holdings }: Props) {
+export function PerformanceView({ snapshots, holdings, dailyValues = [] }: Props) {
   const [range, setRange] = useState<Range>('All')
   const [sortDesc, setSortDesc] = useState(true)
 
-  const filtered = useMemo(() => filterByRange(snapshots, range), [snapshots, range])
+  const filteredSnapshots = useMemo(() => filterByRange(snapshots, range), [snapshots, range])
+  const filteredDaily     = useMemo(() => filterDailyByRange(dailyValues, range), [dailyValues, range])
+
+  const hasDailyData = filteredDaily.length > 0
+
+  // Merged chart data: use daily view when price history is available
+  const chartData = useMemo(
+    () => hasDailyData
+      ? mergeChartData(filteredSnapshots, filteredDaily)
+      : filteredSnapshots.map(s => ({
+          date:            s.snapshot_date,
+          total_value_gbp: s.total_value_gbp,
+          total_cost_gbp:  s.total_cost_gbp,
+        })),
+    [filteredSnapshots, filteredDaily, hasDailyData]
+  )
 
   const latest   = snapshots.at(-1)
   const earliest = snapshots[0]
 
-  // Annualised return (simple, doesn't account for cash contributions)
+  // Annualised return
   const annualised = useMemo(() => {
     if (!latest || !earliest || latest === earliest) return null
     const days = (new Date(latest.snapshot_date).getTime() - new Date(earliest.snapshot_date).getTime())
@@ -135,7 +220,6 @@ export function PerformanceView({ snapshots, holdings }: Props) {
     return (Math.pow(1 + r, 365 / days) - 1) * 100
   }, [latest, earliest])
 
-  // Best / worst non-cash holding
   const investmentHoldings = holdings.filter(h => h.instrument_type !== 'cash')
   const sorted = [...investmentHoldings].sort((a, b) =>
     sortDesc
@@ -151,6 +235,10 @@ export function PerformanceView({ snapshots, holdings }: Props) {
 
   const accountHolders = [...new Set(holdings.map(h => h.account_holder).filter(Boolean))].sort()
   const multiHolder = accountHolders.length > 1
+
+  // Determine if chart has enough data to render
+  const snapshotPoints = chartData.filter(p => p.total_value_gbp != null).length
+  const canRenderChart = hasDailyData ? chartData.length >= 2 : snapshotPoints >= 2
 
   return (
     <div className="space-y-6">
@@ -203,7 +291,14 @@ export function PerformanceView({ snapshots, holdings }: Props) {
       {/* ── Portfolio value chart ─────────────────────────────────────────── */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle className="text-base">Portfolio value over time</CardTitle>
+          <div>
+            <CardTitle className="text-base">Portfolio value over time</CardTitle>
+            {hasDailyData && (
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Includes daily estimates from market prices
+              </p>
+            )}
+          </div>
           <div className="flex gap-1">
             {RANGES.map(r => (
               <Button
@@ -219,7 +314,7 @@ export function PerformanceView({ snapshots, holdings }: Props) {
           </div>
         </CardHeader>
         <CardContent>
-          {filtered.length < 2 ? (
+          {!canRenderChart ? (
             <div className="h-64 flex items-center justify-center text-sm text-muted-foreground">
               {snapshots.length < 2
                 ? 'Import your portfolio regularly to track performance over time.'
@@ -227,7 +322,7 @@ export function PerformanceView({ snapshots, holdings }: Props) {
             </div>
           ) : (
             <ResponsiveContainer width="100%" height={280}>
-              <AreaChart data={filtered} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+              <ComposedChart data={chartData} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
                 <defs>
                   <linearGradient id="gradValue" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%"  stopColor="#2563eb" stopOpacity={0.25} />
@@ -240,7 +335,7 @@ export function PerformanceView({ snapshots, holdings }: Props) {
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
                 <XAxis
-                  dataKey="snapshot_date"
+                  dataKey="date"
                   tickFormatter={d => fmtDate(d)}
                   tick={{ fontSize: 11 }}
                   tickLine={false}
@@ -258,15 +353,21 @@ export function PerformanceView({ snapshots, holdings }: Props) {
                   iconType="plainline"
                   wrapperStyle={{ fontSize: 12, paddingTop: 8 }}
                 />
-                <Area
-                  type="monotone"
-                  dataKey="total_value_gbp"
-                  name="Portfolio value"
-                  stroke="#2563eb"
-                  strokeWidth={2}
-                  fill="url(#gradValue)"
-                  dot={filtered.length <= 6}
-                />
+
+                {/* Daily estimate line — thin solid blue, no fill */}
+                {hasDailyData && (
+                  <Line
+                    type="monotone"
+                    dataKey="estimated_value"
+                    name="Daily estimate"
+                    stroke="#93c5fd"
+                    strokeWidth={1.5}
+                    dot={false}
+                    connectNulls
+                  />
+                )}
+
+                {/* Invested cost baseline */}
                 <Area
                   type="monotone"
                   dataKey="total_cost_gbp"
@@ -276,8 +377,21 @@ export function PerformanceView({ snapshots, holdings }: Props) {
                   strokeDasharray="4 3"
                   fill="url(#gradCost)"
                   dot={false}
+                  connectNulls
                 />
-              </AreaChart>
+
+                {/* Snapshot portfolio value — dots only at snapshot dates */}
+                <Area
+                  type="monotone"
+                  dataKey="total_value_gbp"
+                  name="Portfolio value"
+                  stroke="#2563eb"
+                  strokeWidth={2}
+                  fill="url(#gradValue)"
+                  dot={snapshotPoints <= 6}
+                  connectNulls
+                />
+              </ComposedChart>
             </ResponsiveContainer>
           )}
         </CardContent>

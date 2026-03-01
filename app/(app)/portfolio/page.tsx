@@ -3,7 +3,7 @@ import { redirect } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import { Upload } from 'lucide-react'
+import { Upload, BarChart2 } from 'lucide-react'
 import { PortfolioHoldings } from '@/components/portfolio-holdings'
 
 export default async function PortfolioPage() {
@@ -37,12 +37,20 @@ export default async function PortfolioPage() {
             </p>
           )}
         </div>
-        <Button asChild>
-          <Link href="/portfolio/import">
-            <Upload className="h-4 w-4 mr-2" />
-            Import CSV
-          </Link>
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" asChild>
+            <Link href="/portfolio/data">
+              <BarChart2 className="h-4 w-4 mr-2" />
+              Market data
+            </Link>
+          </Button>
+          <Button asChild>
+            <Link href="/portfolio/import">
+              <Upload className="h-4 w-4 mr-2" />
+              Import CSV
+            </Link>
+          </Button>
+        </div>
       </div>
 
       {holdings && holdings.length > 0 ? (
