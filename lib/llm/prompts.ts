@@ -100,6 +100,32 @@ Be specific and help them define concrete rules the system can apply automatical
 IMPORTANT: UK ISA long-term investment context. NOT regulated financial advice.`,
 }
 
+export const STAGE_EXTRACTION_PROMPTS: Record<number, string> = {
+  1: `Extract the user's financial situation from this conversation as JSON with these keys:
+isa_value_gbp, monthly_budget_gbp, emergency_fund, income_stability, tax_rate, pension_exists, notes.
+Return ONLY valid JSON. Use null for any field not discussed.`,
+
+  2: `Extract the user's investment goals from this conversation as JSON with these keys:
+primary_objective, time_horizon_years, target_value_gbp, target_age, isa_role, withdrawal_plan, notes.
+Return ONLY valid JSON. Use null for any field not discussed.`,
+
+  3: `Extract the user's risk profile from this conversation as JSON with these keys:
+risk_score (integer 1-10), max_drawdown_pct (number), crash_reaction (string description), recovery_patience_years (number), concentration_tolerance (string), past_crash_experience (string), notes.
+Return ONLY valid JSON. Use null for any field not discussed.`,
+
+  4: `Extract the user's investment beliefs from this conversation as JSON with these keys:
+passive_active_preference (one of: passive, active, blend), thematic_interests (array of strings), geographic_bias (string), preferred_instruments (array of strings), esg_screens (array of strings or null), dividend_vs_growth (string), notes.
+Return ONLY valid JSON. Use null for any field not discussed.`,
+
+  5: `Extract the user's strategy construction from this conversation as JSON with these keys:
+core_allocation_pct (number), thematic_allocation_pct (number), individual_allocation_pct (number), core_holdings (array of {name, symbol, target_pct}), thematic_holdings (array of {name, symbol, target_pct}), individual_holdings (array of {name, symbol, target_pct}), rebalancing_trigger_pct (number), max_position_pct (number), cash_strategy (string), notes.
+Return ONLY valid JSON. Use null for any field not discussed.`,
+
+  6: `Extract the user's tactical framework from this conversation as JSON with these keys:
+alert_triggers (array of {event_type, description}), event_responses (array of {event_type, response}), immediate_action_threshold_pct (number), stop_loss_philosophy (string), profit_taking_rules (string), notes.
+Return ONLY valid JSON. Use null for any field not discussed.`,
+}
+
 export const WEEKLY_PLAN_SYSTEM_PROMPT = `You are an expert UK investment strategist generating a personalised weekly investment plan for a Stocks & Shares ISA investor.
 
 The investor has provided their complete strategy profile (financial situation, goals, risk profile, investment beliefs, target portfolio strategy, and tactical framework). You also have access to their current portfolio holdings, recent performance data, and macro context.
@@ -145,6 +171,80 @@ IMPORTANT:
 - UK Stocks & Shares ISA — only ISA-eligible instruments
 - This is NOT regulated financial advice — this is a personal planning tool
 - Always include prominent disclaimer`
+
+const STAGE_COLUMN_MAP: Record<number, string> = {
+  1: 'financial_situation', 2: 'goals', 3: 'risk_profile',
+  4: 'investment_beliefs', 5: 'strategy', 6: 'tactical_framework',
+}
+
+const STAGE_LABEL_MAP: Record<string, string> = {
+  financial_situation: 'Stage 1: Financial Situation',
+  goals: 'Stage 2: Investment Goals',
+  risk_profile: 'Stage 3: Risk Profile',
+  investment_beliefs: 'Stage 4: Investment Beliefs',
+  strategy: 'Stage 5: Strategy Construction',
+  tactical_framework: 'Stage 6: Tactical Framework',
+}
+
+export function getStageEditBriefingPrompt(stage: number, existingDataJson: string, fullProfileJson?: string): string {
+  const base = ADVISORY_STAGE_PROMPTS[stage] || ''
+
+  let otherStagesSection = ''
+  if (fullProfileJson) {
+    try {
+      const profile = JSON.parse(fullProfileJson) as Record<string, unknown>
+      const currentColumn = STAGE_COLUMN_MAP[stage]
+      const sections = Object.entries(STAGE_LABEL_MAP)
+        .filter(([col]) => col !== currentColumn)
+        .map(([col, label]) => {
+          const data = profile[col] as Record<string, unknown> | undefined
+          if (!data || Object.keys(data).length === 0) return null
+          return `${label}:\n${JSON.stringify(data, null, 2)}`
+        })
+        .filter(Boolean)
+      if (sections.length > 0) {
+        otherStagesSection = `\n\nCONTEXT FROM OTHER STAGES (use this to inform your advice — do NOT re-ask about these):\n${sections.join('\n\n')}`
+      }
+    } catch { /* ignore */ }
+  }
+
+  return `${base}${otherStagesSection}
+
+EDIT MODE: The user already has a saved configuration for this stage:
+${existingDataJson}
+
+Start by summarising their existing configuration in 2-3 friendly sentences, then ask if there is anything they would like to update or add. Do NOT ask questions they have already answered unless they want to revisit them.`
+}
+
+export const ACTION_ADVISOR_SYSTEM_PROMPT = `You are a personal UK investment advisor with full knowledge of the user's investment strategy and current portfolio. Help the user think through and plan a specific portfolio action. Ask clarifying questions, provide analysis against their strategy, and conclude with concrete, actionable recommendations.
+
+Your role:
+- Understand the specific action the user wants to plan (buy, sell, rebalance, review)
+- Analyse it against their stated strategy, risk profile, and goals
+- Check alignment with their investment beliefs and tactical framework
+- Provide pros/cons and alternative approaches
+- Conclude with a concrete recommendation
+
+IMPORTANT: UK Stocks & Shares ISA context. All amounts in GBP (£). This is NOT regulated financial advice — this is a personal planning tool.`
+
+export const ACTION_COMPLETION_PROMPT = `Extract a structured investment recommendation from this conversation as JSON with the following schema:
+{
+  "title": "Short descriptive title for this advisory session",
+  "objective": "One sentence describing what the user wanted to achieve",
+  "analysis": "2-3 sentence summary of the key analysis",
+  "recommended_actions": [
+    {
+      "action": "buy|sell|hold|rebalance",
+      "symbol": "TICKER or null",
+      "rationale": "Why this action",
+      "amount_gbp": 1000
+    }
+  ],
+  "risks": "Key risks to be aware of",
+  "next_steps": "Concrete next steps for the user",
+  "disclaimer": "Not regulated financial advice. This is a personal planning tool."
+}
+Return ONLY valid JSON. Use null for optional fields not discussed.`
 
 export const EVENT_MONITOR_SYSTEM_PROMPT = `You are an expert UK investment analyst monitoring world events and market conditions for a Stocks & Shares ISA investor.
 

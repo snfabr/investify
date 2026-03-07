@@ -9,6 +9,7 @@ import {
   History,
   Settings,
   Briefcase,
+  Zap,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { SignOutButton } from '@/components/sign-out-button'
@@ -19,6 +20,7 @@ const NAV_ITEMS = [
   { href: '/alerts',      label: 'Alerts',       icon: Bell, badge: true },
   { href: '/performance', label: 'Performance',  icon: TrendingUp },
   { href: '/strategy',    label: 'Strategy',     icon: Target },
+  { href: '/action',      label: 'Action',       icon: Zap },
   { href: '/history',     label: 'History',      icon: History },
   { href: '/settings',    label: 'Settings',     icon: Settings },
 ]

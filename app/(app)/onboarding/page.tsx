@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -8,6 +8,7 @@ import { Progress } from '@/components/ui/progress'
 import { Textarea } from '@/components/ui/textarea'
 import { Separator } from '@/components/ui/separator'
 import { CheckCircle, Circle, Send, Bot, User } from 'lucide-react'
+import { toast } from 'sonner'
 
 const STAGES = [
   {
@@ -51,22 +52,25 @@ interface Message {
 export default function OnboardingPage() {
   const [currentStage, setCurrentStage] = useState(1)
   const [completedStages, setCompletedStages] = useState<number[]>([])
-  const [messages, setMessages] = useState<Message[]>([])
+  // Keep messages per stage so switching tabs doesn't wipe the conversation
+  const [stageMessages, setStageMessages] = useState<Record<number, Message[]>>({})
   const [inputValue, setInputValue] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [profileId, setProfileId] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
 
   const stage = STAGES.find(s => s.id === currentStage)!
+  const messages = useMemo(() => stageMessages[currentStage] ?? [], [stageMessages, currentStage])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  }, [stageMessages, currentStage])
 
-  // Reset chat when stage changes
+  // Reset input and error on stage switch, but keep messages
   useEffect(() => {
-    setMessages([])
     setInputValue('')
     setError(null)
   }, [currentStage])
@@ -81,14 +85,16 @@ export default function OnboardingPage() {
     }
 
     const updatedMessages = [...messages, userMessage]
-    setMessages(updatedMessages)
+    setStageMessages(prev => ({ ...prev, [currentStage]: updatedMessages }))
     setInputValue('')
     setIsStreaming(true)
     setError(null)
 
-    // Placeholder for streaming assistant response
     const assistantId = `assistant-${Date.now()}`
-    setMessages(prev => [...prev, { id: assistantId, role: 'assistant', content: '' }])
+    setStageMessages(prev => ({
+      ...prev,
+      [currentStage]: [...updatedMessages, { id: assistantId, role: 'assistant', content: '' }],
+    }))
 
     try {
       abortRef.current = new AbortController()
@@ -99,14 +105,12 @@ export default function OnboardingPage() {
         body: JSON.stringify({
           messages: updatedMessages.map(m => ({ role: m.role, content: m.content })),
           stage: currentStage,
+          profileId: profileId ?? undefined,
         }),
         signal: abortRef.current.signal,
       })
 
-      if (!res.ok) {
-        throw new Error(`Request failed: ${res.status}`)
-      }
-
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`)
       if (!res.body) throw new Error('No response body')
 
       const reader = res.body.getReader()
@@ -118,47 +122,77 @@ export default function OnboardingPage() {
         if (done) break
 
         const chunk = decoder.decode(value, { stream: true })
-        // Handle UI message stream format (lines starting with 0: for text)
-        const lines = chunk.split('\n')
-        for (const line of lines) {
+        for (const line of chunk.split('\n')) {
           if (line.startsWith('0:')) {
             try {
-              const jsonStr = line.slice(2)
-              const parsed = JSON.parse(jsonStr)
+              const parsed = JSON.parse(line.slice(2))
               if (typeof parsed === 'string') {
                 assistantText += parsed
-                setMessages(prev =>
-                  prev.map(m => m.id === assistantId ? { ...m, content: assistantText } : m)
-                )
+                setStageMessages(prev => ({
+                  ...prev,
+                  [currentStage]: prev[currentStage]?.map(m =>
+                    m.id === assistantId ? { ...m, content: assistantText } : m
+                  ) ?? [],
+                }))
               }
-            } catch {
-              // Not JSON, might be plain text chunk
-            }
+            } catch { /* partial chunk */ }
           }
         }
       }
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
         setError(err instanceof Error ? err.message : 'An error occurred')
-        setMessages(prev => prev.filter(m => m.id !== assistantId))
+        setStageMessages(prev => ({
+          ...prev,
+          [currentStage]: (prev[currentStage] ?? []).filter(m => m.id !== assistantId),
+        }))
       }
     } finally {
       setIsStreaming(false)
     }
-  }, [messages, currentStage, isStreaming])
+  }, [messages, currentStage, isStreaming, profileId])
+
+  async function markStageComplete() {
+    const currentMessages = stageMessages[currentStage] ?? []
+
+    if (currentMessages.length === 0) {
+      toast.warning(`Have a conversation for Stage ${currentStage} first, then mark it complete.`)
+      return
+    }
+
+    if (!completedStages.includes(currentStage)) {
+      setCompletedStages(prev => [...prev, currentStage])
+    }
+
+    setIsSaving(true)
+    try {
+      const res = await fetch('/api/advisory/stage/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stage: currentStage,
+          messages: currentMessages.map(m => ({ role: m.role, content: m.content })),
+          profileId: profileId ?? undefined,
+          mode: 'onboarding',
+        }),
+      })
+      const data = res.ok ? await res.json() : null
+      if (data?.profileId) setProfileId(data.profileId)
+      if (!res.ok) toast.error('Failed to save stage — please try again.')
+    } catch {
+      toast.error('Failed to save stage — please try again.')
+    } finally {
+      setIsSaving(false)
+    }
+
+    if (currentStage < 6) {
+      setCurrentStage(currentStage + 1)
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     await sendMessage(inputValue)
-  }
-
-  function markStageComplete() {
-    if (!completedStages.includes(currentStage)) {
-      setCompletedStages(prev => [...prev, currentStage])
-    }
-    if (currentStage < 6) {
-      setCurrentStage(currentStage + 1)
-    }
   }
 
   const progressPct = (completedStages.length / 6) * 100
@@ -184,6 +218,7 @@ export default function OnboardingPage() {
           {STAGES.map((s) => {
             const isComplete = completedStages.includes(s.id)
             const isCurrent = s.id === currentStage
+            const hasMessages = (stageMessages[s.id]?.length ?? 0) > 0
             return (
               <button
                 key={s.id}
@@ -198,7 +233,7 @@ export default function OnboardingPage() {
                   {isComplete ? (
                     <CheckCircle className="h-4 w-4 flex-shrink-0 text-green-500" />
                   ) : (
-                    <Circle className="h-4 w-4 flex-shrink-0 opacity-50" />
+                    <Circle className={`h-4 w-4 flex-shrink-0 ${hasMessages && !isCurrent ? 'opacity-70' : 'opacity-50'}`} />
                   )}
                   <span className="font-medium leading-tight">{s.title}</span>
                 </div>
@@ -221,8 +256,8 @@ export default function OnboardingPage() {
                 {completedStages.includes(currentStage) ? (
                   <Badge variant="secondary" className="text-green-600">Complete</Badge>
                 ) : (
-                  <Button size="sm" variant="outline" onClick={markStageComplete}>
-                    Mark complete
+                  <Button size="sm" variant="outline" onClick={markStageComplete} disabled={isSaving || isStreaming}>
+                    {isSaving ? 'Saving…' : 'Mark complete'}
                   </Button>
                 )}
               </div>
@@ -300,15 +335,15 @@ export default function OnboardingPage() {
             <Button
               variant="outline"
               onClick={() => setCurrentStage(Math.max(1, currentStage - 1))}
-              disabled={currentStage === 1}
+              disabled={currentStage === 1 || isSaving}
             >
               Previous stage
             </Button>
             <Button
               onClick={markStageComplete}
-              disabled={currentStage === 6 && completedStages.includes(6)}
+              disabled={(currentStage === 6 && completedStages.includes(6)) || isSaving || isStreaming}
             >
-              {currentStage === 6 ? 'Finish' : 'Next stage'}
+              {isSaving ? 'Saving…' : currentStage === 6 ? 'Finish' : 'Next stage →'}
             </Button>
           </div>
         </div>
